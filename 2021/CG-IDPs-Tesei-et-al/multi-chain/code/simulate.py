@@ -1,31 +1,43 @@
-from analyse import *
+from analyse import genDCD, genParamsLJ, genParamsDH
 import hoomd
 import hoomd.md
 import time
-import os
-import sys
 from argparse import ArgumentParser
 from mdtraj.utils.rotation import rotation_matrix_from_quaternion
 from PeptideBuilder import Geometry
 import PeptideBuilder
-import Bio.PDB
+from Bio.PDB.PDBIO import PDBIO
+import numpy as np
+import pandas as pd
 
-parser = ArgumentParser()
-parser.add_argument('--name',nargs='?',const='', type=str)
-parser.add_argument('--temp',nargs='?',const='', type=int)
-args = parser.parse_args()
 
-print(hoomd.__file__)
-
-def simulate(residues,name,prot,temp):
+def simulate(residues, name, prot, temp):
     residues = residues.set_index('one')
-    hoomd.context.initialize("--mode=gpu");
-    hoomd.option.set_notice_level(1)
-    #hoomd.util.quiet_status()
-    pairs, lj_eps, lj_lambda, lj_sigma, fasta, types, MWs = genParamsLJ(residues,name,prot)
-    yukawa_eps, yukawa_kappa, charges = genParamsDH(residues,name,prot,temp)
+
+    try:
+        device = hoomd.device.GPU()
+    except Exception as e:
+        print("GPU initialisation returned an error:")
+        print(e)
+        print("")
+        print("Attempting CPU initialisation")
+        print("")
+        device = hoomd.device.CPU()
+    else:
+        if not device.is_available():
+            print("GPU not available, running on CPU instead!")
+            device = hoomd.device.CPU()
+
+    device.notice_level = 1
+
+    simulation = hoomd.Simulation(device, seed=40495)
+
+    pairs, lj_eps, lj_lambda, lj_sigma, fasta, types, MWs = genParamsLJ(residues, name, prot)
+    yukawa_eps, yukawa_kappa, _ = genParamsDH(residues, name, prot, temp)
+
+    # Protein length (number of amino acids)
     N = len(fasta)
-    
+
     L = 15.
     margin = 2
     if N > 400:
@@ -39,124 +51,215 @@ def simulate(residues,name,prot,temp):
         margin = 4
         Nsteps = 6e7
     else:
-        Lz = 10*L
+        Lz = 10 * L
         Nsteps = 6e7
-    
-    xy = np.empty(0)
-    xy = np.append(xy,np.random.rand(2)*(L-margin)-(L-margin)/2).reshape((-1,2))
-    for x,y in np.random.rand(1000,2)*(L-margin)-(L-margin)/2:
-        x1 = x-L if x>0 else x+L
-        y1 = y-L if y>0 else y+L
-        if np.all(np.linalg.norm(xy-[x,y],axis=1)>.7):
-            if np.all(np.linalg.norm(xy-[x1,y],axis=1)>.7):
-                if np.all(np.linalg.norm(xy-[x,y1],axis=1)>.7):
-                    xy = np.append(xy,[x,y]).reshape((-1,2))
-        if xy.shape[0] == 100:
-            break 
-   
+
+    def get_xy_positions(n_chains_max: int = 100):
+        """Generate random position in a 2D box"""
+        xy = np.empty(0)
+        xy = np.append(xy, np.random.rand(2) * (L - margin) - (L - margin) / 2).reshape((-1, 2))
+
+        for x, y in np.random.rand(1000, 2) * (L - margin) - (L - margin) / 2:
+            # check if too close to existing positions
+            if np.any(np.linalg.norm(xy - [x, y], axis=1) <= .7):
+                continue
+
+            # same for periodic images
+            x_periodic_image = x - L if x > 0 else x + L
+            if np.any(np.linalg.norm(xy - [x_periodic_image, y], axis=1) <= .7):
+                continue
+            y_periodic_image = y - L if y > 0 else y + L
+            if np.any(np.linalg.norm(xy - [x, y_periodic_image], axis=1) <= .7):
+                continue
+            if np.any(np.linalg.norm(xy - [x_periodic_image, y_periodic_image], axis=1) <= .7):
+                continue
+
+            xy = np.append(xy, [x, y]).reshape((-1, 2))
+
+            if xy.shape[0] == n_chains_max:
+                break
+
+        return xy
+
+    xy = get_xy_positions()
     n_chains = xy.shape[0]
-    
-    print('Number of chains',n_chains,N,'residues long')
-           
-    snapshot = hoomd.data.make_snapshot(N=N*n_chains,
-                                box=hoomd.data.boxdim(Lx=L, Ly=L, Lz=Lz),
-                                particle_types=types,
-                                bond_types=['polymer']);
 
-    geo = Geometry.geometry(prot.fasta[0])
-    geo.phi = -120
-    geo.psi_im1 = 150
-    structure = PeptideBuilder.initialize_res(geo)
-    for residue in prot.fasta[1:]:
-        structure = PeptideBuilder.add_residue(structure, residue, geo.phi, geo.psi_im1)
-    out = Bio.PDB.PDBIO()
-    out.set_structure(structure)
-    xyz = []
-    for atom in out.structure.get_atoms():
-        if atom.name == 'CA':
-            xyz.append([atom.coord[0]/10.,atom.coord[1]/10.,atom.coord[2]/10.])
-    xyz = np.array(xyz)
-    v = xyz[-1] - xyz[0]
-    u = np.array([0,0,1])
-    a = np.cross(v,u) 
-    a = a / np.linalg.norm(a,keepdims=True)
-    b = np.arccos( np.dot(v,u) / np.linalg.norm(v) )
-    quaternion = np.insert(np.sin(-b/2).reshape(-1,1)*a,0,np.cos(-b/2),axis=1)
-    newxyz = xyz - np.mean(xyz,axis=0)
-    newxyz = np.matmul(newxyz,rotation_matrix_from_quaternion(quaternion)) 
-    xyz = np.array(newxyz[0])
-    print(xyz[:,0].min(),xyz[:,0].max(),xy[:,0].min(),xy[:,0].max())
-    print(xyz[:,1].min(),xyz[:,1].max(),xy[:,1].min(),xy[:,1].max())
-    fst = ''.join(prot.fasta)
+    print(f'Number of chains {n_chains}, {N} residues long')
 
-    snapshot.bonds.resize(n_chains*(N-1));
+    def get_3D_positions():
+        geo = Geometry.geometry(prot.fasta[0])
+        geo.phi = -120
+        geo.psi_im1 = 150
+        structure = PeptideBuilder.initialize_res(geo)
+        for residue in prot.fasta[1:]:
+            structure = PeptideBuilder.add_residue(
+                structure, residue, geo.phi, geo.psi_im1
+            )
 
-    for j,(x,y) in enumerate(xy):
-        begin = j*N
-        end = j*N+N
+        out = PDBIO()
+        out.set_structure(structure)
+        xyz = []
+        for atom in out.structure.get_atoms():
+            if atom.name == 'CA':
+                xyz.append(atom.coord[:3])
+        xyz = np.array(xyz) / 10.0
+
+        v = xyz[-1] - xyz[0]
+        u = np.array([0, 0, 1])
+        a = np.cross(v, u)
+        a = a / np.linalg.norm(a, keepdims=True)
+        b = np.arccos(np.dot(v, u) / np.linalg.norm(v))
+        quaternion = np.insert(np.sin(-b / 2).reshape(-1, 1) * a, 0, np.cos(-b / 2), axis=1)
+        newxyz = xyz - np.mean(xyz, axis=0)
+        newxyz = np.matmul(newxyz, rotation_matrix_from_quaternion(quaternion))
+        xyz = np.array(newxyz[0])
+
+        print(xyz[:, 0].min(), xyz[:, 0].max(), xy[:, 0].min(), xy[:, 0].max())
+        print(xyz[:, 1].min(), xyz[:, 1].max(), xy[:, 1].min(), xy[:, 1].max())
         
-        snapshot.particles.position[begin:end] = [[xyz[i,0]+x,xyz[i,1]+y,xyz[i,2]] for i in range(N)];
-        snapshot.particles.typeid[begin:end] = [types.index(a) for a in fasta]
-        snapshot.particles.mass[begin:end] = [residues.loc[a].MW for a in prot.fasta]
-        snapshot.particles.mass[begin] += 2
-        snapshot.particles.mass[end-1] += 16
-    
-        snapshot.bonds.group[begin-j:end-j-1] = [[i,i+1] for i in range(begin,end-1)];
-        snapshot.bonds.typeid[begin-j:end-j-1] = [0] * (N-1)
+        return xyz
 
-    hoomd.init.read_snapshot(snapshot);
+    snapshot = hoomd.Snapshot()
+    # check rank to support MPI runs with multiple processors
+    if snapshot.communicator.rank == 0:
+        snapshot.configuration.box = hoomd.Box(Lx=L, Ly=L, Lz=Lz)
+        snapshot.particles.types = types
+        snapshot.bonds.types = ['polymer']
+        snapshot.particles.N = N * n_chains
+        # resize array
+        snapshot.bonds.N = n_chains * (N - 1)
 
-    kT = 8.3145*temp*1e-3
-    hb = hoomd.md.bond.harmonic();
-    hb.bond_coeff.set('polymer', k=8033.0, r0=0.38);
+        xyz = get_3D_positions()
 
-    nl = hoomd.md.nlist.cell();
+        for j, (x, y) in enumerate(xy):
+            begin = j * N
+            end = j * N + N
 
-    lj1 = hoomd.md.pair.lj(r_cut=4.0, nlist=nl, name="one")
-    lj2 = hoomd.md.pair.lj(r_cut=4.0, nlist=nl, name="two")
-    yukawa = hoomd.md.pair.yukawa(r_cut=4.0, nlist=nl)
-    for a,b in pairs:
-        yukawa.pair_coeff.set(a, b, epsilon=yukawa_eps.loc[a,b], kappa=yukawa_kappa, r_cut=4.)
-        lj1.pair_coeff.set(a, b, epsilon=lj_eps*(1-lj_lambda.loc[a,b]), sigma=lj_sigma.loc[a,b], 
-                    r_cut=np.power(2.,1./6)*lj_sigma.loc[a,b])
-        lj2.pair_coeff.set(a, b, epsilon=lj_eps*lj_lambda.loc[a,b], sigma=lj_sigma.loc[a,b], r_cut=4.)
+            snapshot.particles.position[begin:end] = [
+                [xyz[i, 0] + x, xyz[i, 1] + y, xyz[i, 2]] for i in range(N)]
+            snapshot.particles.typeid[begin:end] = [types.index(a) for a in fasta]
+            snapshot.particles.mass[begin:end] = [
+                residues.loc[a].MW for a in prot.fasta]
+            snapshot.particles.mass[begin] += 2
+            snapshot.particles.mass[end - 1] += 16
 
-    lj1.set_params(mode='shift')
-    yukawa.set_params(mode='shift')
-    nl.reset_exclusions(exclusions = ['bond'])
+            snapshot.bonds.group[begin - j:end - j - 1] = [
+                [i, i + 1] for i in range(begin, end - 1)
+            ]
+            snapshot.bonds.typeid[begin - j:end - j - 1] = [0] * (N - 1)
 
-    walls = hoomd.md.wall.group()
+    simulation.create_state_from_snapshot(snapshot)
 
+    kT = 8.3145 * temp * 1e-3
+    harmonic_bond = hoomd.md.bond.Harmonic()
+    harmonic_bond.params['polymer'] = {'k': 8033.0, 'r0': 0.38}
+
+    neighbor_list = hoomd.md.nlist.Cell(buffer=0.4, exclusions=('bond',), deterministic=True)
+
+    lj1 = hoomd.md.pair.LJ(nlist=neighbor_list, default_r_cut=4.0, mode='shift')
+    lj2 = hoomd.md.pair.LJ(nlist=neighbor_list, default_r_cut=4.0)
+    yukawa = hoomd.md.pair.Yukawa(nlist=neighbor_list, default_r_cut=4.0, mode='shift')
+    for a, b in pairs:
+        yukawa.params[(str(a), str(b))] = {'epsilon': yukawa_eps.loc[a, b], 'kappa': yukawa_kappa}
+
+        lj1.params[(str(a), str(b))] = {'epsilon': lj_eps * (1 - lj_lambda.loc[a, b]), 'sigma': lj_sigma.loc[a, b]}
+        lj1.r_cut[(str(a), str(b))] = 2.**(1./6.) * lj_sigma.loc[a, b]
+
+        lj2.params[(str(a), str(b))] = {'epsilon': lj_eps * lj_lambda.loc[a, b], 'sigma': lj_sigma.loc[a, b]}
+
+    walls = []
     if N > 400:
-        walls.add_plane((0,0,-50),(0,0,1))
-        walls.add_plane((0,0,50),(0,0,-1))
+        walls.append(
+            hoomd.wall.Plane((0, 0, -50), (0, 0, 1))
+        )
+        walls.append(
+            hoomd.wall.Plane((0, 0, 50), (0, 0, -1))
+        )
     elif N > 200:
-        walls.add_plane((0,0,-30),(0,0,1))
-        walls.add_plane((0,0,30),(0,0,-1))
+        walls.append(
+            hoomd.wall.Plane((0, 0, -30), (0, 0, 1))
+        )
+        walls.append(
+            hoomd.wall.Plane((0, 0, 30), (0, 0, -1))
+        )
     else:
-        walls.add_plane((0,0,-10),(0,0,1))
-        walls.add_plane((0,0,10),(0,0,-1))
-    gauss = hoomd.md.wall.gauss(walls,r_cut=4)
-    gauss.force_coeff.set(types, sigma=1.0, epsilon=10.0)
+        walls.append(
+            hoomd.wall.Plane((0, 0, -10), (0, 0, 1))
+        )
+        walls.append(
+            hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
+        )
 
-    integrator_mode = hoomd.md.integrate.mode_standard(dt=0.005);   
-    integrator = hoomd.md.integrate.langevin(group=hoomd.group.all(),kT=kT,seed=np.random.randint(100));
+    gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
+    gaussian_wall.params[types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0}
 
-    for a,mw in zip(types,MWs):
-        integrator.set_gamma(a, mw/100)
- 
-    hoomd.run(2e7)
-    gauss.disable()
+    integrator_method = hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=kT)
+    for a, mw in zip(types, MWs):
+        integrator_method.gamma[str(a)] = mw / 100
 
-    hoomd.dump.gsd(filename=name+"/{:d}/{:s}.gsd".format(temp,name), period=5e4, group=hoomd.group.all(), overwrite=True);
-    hoomd.dump.gsd(filename=name+"/{:d}/restart.gsd".format(temp), group=hoomd.group.all(), truncate=True, period=1e6, phase=0)
+    integrator = hoomd.md.Integrator(dt=0.005, methods=[integrator_method])
+    integrator.forces.append(harmonic_bond)
+    integrator.forces.append(lj1)
+    integrator.forces.append(lj2)
+    integrator.forces.append(yukawa)
+    integrator.forces.append(gaussian_wall)
 
-    hoomd.run(Nsteps)
-    genDCD(residues,name,prot,temp,n_chains)
+    operations = hoomd.Operations()
+    operations.integrator = integrator
 
-residues = pd.read_csv('residues.csv').set_index('three',drop=False)
-proteins = pd.read_pickle('proteins.pkl')
-print(args.name,args.temp)
-t0 = time.time()
-simulate(residues,args.name,proteins.loc[args.name],args.temp)
-print('Timing {:.3f}'.format(time.time()-t0))
+    simulation.operations = operations
+
+    # Logging
+    logger = hoomd.logging.Logger(categories=['scalar'])
+    logger.add(simulation, quantities=['timestep', 'walltime'])
+
+    timelog = hoomd.write.Table(
+        trigger = hoomd.trigger.Periodic(period=int(1e3)),
+        logger = logger
+    )
+    simulation.operations.writers.append(timelog)
+
+    # Equilibration
+    simulation.run(2e7)
+
+    # Remove walls
+    simulation.operations.integrator.forces.remove(gaussian_wall)
+
+    gsdfile = hoomd.write.GSD(
+        trigger = hoomd.trigger.Periodic(period=int(5e4)),
+        filename = name + "/{:d}/{:s}.gsd".format(temp, name),
+        filter=hoomd.filter.All(),
+        mode='wb'
+    )
+    gsdrestart = hoomd.write.GSD(
+        trigger = hoomd.trigger.Periodic(period=int(1e6), phase=int(0)),
+        filename=name + "/{:d}/restart.gsd".format(temp),
+        filter=hoomd.filter.All(),
+        mode='wb',
+        truncate=True,
+    )
+
+    simulation.operations.writers.append(gsdfile)
+    simulation.operations.writers.append(gsdrestart)
+
+    # Run
+    simulation.run(Nsteps)
+
+    genDCD(residues, name, prot, temp, n_chains)
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument('--name', nargs='?', const='', type=str)
+    parser.add_argument('--temp', nargs='?', const='', type=int)
+    args = parser.parse_args()
+
+    print(hoomd.__file__)
+
+    residues = pd.read_csv('residues.csv').set_index('three', drop=False)
+    proteins = pd.read_pickle('proteins.pkl')
+    print("protein: ", args.name, "temperature: ", args.temp)
+
+    t0 = time.time()
+    simulate(residues, args.name, proteins.loc[args.name], args.temp)
+    print('Timing {:.3f}'.format(time.time() - t0))
