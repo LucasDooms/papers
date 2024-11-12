@@ -167,31 +167,17 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
 
         lj2.params[(str(a), str(b))] = {'epsilon': lj_eps * lj_lambda.loc[a, b], 'sigma': lj_sigma.loc[a, b]}
 
-    walls = []
-    if N > 400:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -50), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 50), (0, 0, -1))
-        )
-    elif N > 200:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -30), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 30), (0, 0, -1))
-        )
-    else:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -10), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
-        )
-
-    gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
-    gaussian_wall.params[types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0}
+    # resize box
+    inverse_volume_ramp = hoomd.variant.box.InverseVolumeRamp(
+        initial_box=simulation.state.box,
+        final_volume=0.9 * simulation.state.box.volume,
+        t_start=simulation.timestep,
+        t_ramp=20_000,
+    )
+    box_resize = hoomd.update.BoxResize(
+        trigger=hoomd.trigger.Periodic(10),
+        box=inverse_volume_ramp,
+    )
 
     integrator_method = hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=kT)
     for a, mw in zip(types, MWs):
@@ -202,10 +188,10 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     integrator.forces.append(lj1)
     integrator.forces.append(lj2)
     integrator.forces.append(yukawa)
-    integrator.forces.append(gaussian_wall)
 
     operations = hoomd.Operations()
     operations.integrator = integrator
+    operations.updaters.append(box_resize)
 
     simulation.operations = operations
 
@@ -220,15 +206,15 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     simulation.operations.writers.append(timelog)
 
     # Equilibration
-    simulation.run(2e7)
+    simulation.run(1e5)
 
     if snapshot.communicator.rank == 0:
         print("----------------------")
         print("Finished equilibration")
         print("----------------------")
 
-    # Remove walls
-    simulation.operations.integrator.forces.remove(gaussian_wall)
+    # remove resizer
+    simulation.operations.updaters.remove(box_resize)
 
     gsdfile = hoomd.write.GSD(
         trigger = hoomd.trigger.Periodic(period=int(5e4)),
