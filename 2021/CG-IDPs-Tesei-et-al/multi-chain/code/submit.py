@@ -17,6 +17,7 @@ protein_names = ['FUS']
 temperatures = [323, 360, 380, 400]
 model = 'M1'
 seed = 1431455135312
+method = "resize"
 Nsteps = int(2e7)
 walltime = {'d': 1, 'h': 0, 'm': 0, 's': 0}
 
@@ -45,7 +46,7 @@ walltime_formatted = slurm_format(walltime_seconds)
 proteins_db = initProteins()
 for name, prot in proteins_db.loc[protein_names].iterrows():
     for temp in temperatures:
-        statepoint = dict(name=name, temp=temp, model=model, seed=seed, Nsteps=Nsteps, walltime_dict=walltime, walltime=walltime_seconds)
+        statepoint = dict(name=name, temp=temp, model=model, seed=seed, Nsteps=Nsteps, method=method, walltime_dict=walltime, walltime=walltime_seconds)
         job = project.open_job(statepoint)
         job.init()
 

@@ -273,33 +273,53 @@ def equilibrate(job):
         job.fn(EQUILIBRIUM_RESTART_FN if job.isfile(EQUILIBRIUM_RESTART_FN) else "initial.gsd")
     )
 
-    walls = []
-    if job.doc.N > 400:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -50), (0, 0, 1))
+    if job.sp.method == "box":
+        walls = []
+        if job.doc.N > 400:
+            walls.append(
+                hoomd.wall.Plane((0, 0, -50), (0, 0, 1))
+            )
+            walls.append(
+                hoomd.wall.Plane((0, 0, 50), (0, 0, -1))
+            )
+        elif job.doc.N > 200:
+            walls.append(
+                hoomd.wall.Plane((0, 0, -30), (0, 0, 1))
+            )
+            walls.append(
+                hoomd.wall.Plane((0, 0, 30), (0, 0, -1))
+            )
+        else:
+            walls.append(
+                hoomd.wall.Plane((0, 0, -10), (0, 0, 1))
+            )
+            walls.append(
+                hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
+            )
+
+        gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
+        gaussian_wall.params[job.doc.types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0} # type: ignore
+
+        simulation.operations.integrator.forces.append(gaussian_wall) # type: ignore
+    elif job.sp.method == "resize":
+        state = simulation.state
+        assert(state is not None)
+
+        # resize box
+        inverse_volume_ramp = hoomd.variant.box.InverseVolumeRamp(
+            initial_box=state.box,
+            final_volume=0.9 * state.box.volume,
+            t_start=simulation.timestep,
+            t_ramp=20_000,
         )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 50), (0, 0, -1))
+        box_resize = hoomd.update.BoxResize(
+            trigger=hoomd.trigger.Periodic(10),
+            box=inverse_volume_ramp,
         )
-    elif job.doc.N > 200:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -30), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 30), (0, 0, -1))
-        )
+
+        simulation.operations.updaters.append(box_resize)
     else:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -10), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
-        )
-
-    gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
-    gaussian_wall.params[job.doc.types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0} # type: ignore
-
-    simulation.operations.integrator.forces.append(gaussian_wall) # type: ignore
+        raise ValueError(f"Unknown method \"{job.sp.method}\"")
 
 
     gsdrestart = hoomd.write.GSD(
@@ -317,9 +337,6 @@ def equilibrate(job):
             print("----------------------")
             print("Finished equilibration")
             print("----------------------")
-
-        # Remove walls
-        simulation.operations.integrator.forces.remove(gaussian_wall) # type: ignore
 
         hoomd.write.GSD.write(simulation.state, job.fn(EQUILIBRIUM_FN))
 
@@ -361,6 +378,20 @@ def simulate(job):
     )
     simulation.operations.writers.append(timelog)
 
+<<<<<<< HEAD
+=======
+    # Equilibration
+    simulation.run(1e5)
+
+    if snapshot.communicator.rank == 0:
+        print("----------------------")
+        print("Finished equilibration")
+        print("----------------------")
+
+    # remove resizer
+    simulation.operations.updaters.remove(box_resize)
+
+>>>>>>> 7786102 (test: replace Gaussian wall with box_resize method)
     gsdfile = hoomd.write.GSD(
         trigger = hoomd.trigger.Periodic(period=int(5e4)),
         filename = job.fn("run.gsd"),
