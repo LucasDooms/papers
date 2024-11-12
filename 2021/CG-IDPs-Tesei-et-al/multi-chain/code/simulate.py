@@ -1,4 +1,4 @@
-from analyse import genDCD, genParamsLJ, genParamsDH
+from analyse import initProteins, genDCD, genParamsLJ, genParamsDH
 import hoomd
 import hoomd.md
 import time
@@ -273,7 +273,7 @@ if __name__ == "__main__":
     print(hoomd.__file__)
 
     residues = pd.read_csv('residues.csv').set_index('three', drop=False)
-    proteins = pd.read_pickle('proteins.pkl')
+    proteins = initProteins()
     print("protein: ", args.name, "temperature: ", args.temp)
 
     t0 = time.time()

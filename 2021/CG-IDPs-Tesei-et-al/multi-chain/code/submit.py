@@ -4,7 +4,6 @@ import subprocess
 from jinja2 import Template
 
 proteins = initProteins()
-proteins.to_pickle('proteins.pkl')
 
 submission = Template("""#!/bin/bash
 #SBATCH --job-name={{name}}_{{temp}}
@@ -32,7 +31,7 @@ r = pd.read_csv('residues.csv').set_index('three')
 r.lambdas = r['M1']
 r.to_csv('residues.csv')
 
-for name,prot in proteins.loc[['P4D','P7R','M6R','P7FM7Y','M8FP4Y','M10R']].iterrows():
+for name,prot in proteins.loc[['ht40', 'P4D', 'P7R', 'M6R', 'P7FM7Y', 'M8FP4Y', 'M10R']].iterrows():
     if not os.path.isdir(name):
         os.mkdir(name)
     for temp in [323]:
