@@ -222,6 +222,11 @@ def simulate(residues, name, prot, temp):
     # Equilibration
     simulation.run(2e7)
 
+    if snapshot.communicator.rank == 0:
+        print("----------------------")
+        print("Finished equilibration")
+        print("----------------------")
+
     # Remove walls
     simulation.operations.integrator.forces.remove(gaussian_wall)
 
@@ -245,7 +250,18 @@ def simulate(residues, name, prot, temp):
     # Run
     simulation.run(Nsteps)
 
-    genDCD(residues, name, prot, temp, n_chains)
+    if snapshot.communicator.rank == 0:
+        print("--------------")
+        print("Run completed!")
+        print("--------------")
+
+    # Make sure writers are finished
+    for writer in simulation.operations.writers:
+        if hasattr(writer, 'flush'):
+            writer.flush()
+
+    if snapshot.communicator.rank == 0:
+        genDCD(residues, name, prot, temp, n_chains)
 
 
 if __name__ == "__main__":
