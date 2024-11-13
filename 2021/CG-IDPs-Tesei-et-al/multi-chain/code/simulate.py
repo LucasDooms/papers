@@ -122,7 +122,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     snapshot = hoomd.Snapshot()
     # check rank to support MPI runs with multiple processors
     if snapshot.communicator.rank == 0:
-        snapshot.configuration.box = hoomd.Box(Lx=L, Ly=L, Lz=Lz)
+        snapshot.configuration.box = hoomd.Box(Lx=L, Ly=L, Lz=N * 0.5)
         snapshot.particles.types = types
         snapshot.bonds.types = ['polymer']
         snapshot.particles.N = N * n_chains
@@ -168,11 +168,12 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
         lj2.params[(str(a), str(b))] = {'epsilon': lj_eps * lj_lambda.loc[a, b], 'sigma': lj_sigma.loc[a, b]}
 
     # resize box
+    ramp_steps = int(2e3)
     inverse_volume_ramp = hoomd.variant.box.InverseVolumeRamp(
         initial_box=simulation.state.box,
         final_volume=0.9 * simulation.state.box.volume,
         t_start=simulation.timestep,
-        t_ramp=20_000,
+        t_ramp=ramp_steps,
     )
     box_resize = hoomd.update.BoxResize(
         trigger=hoomd.trigger.Periodic(10),
@@ -206,7 +207,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     simulation.operations.writers.append(timelog)
 
     # Equilibration
-    simulation.run(1e5)
+    simulation.run(ramp_steps + 1000)
 
     if snapshot.communicator.rank == 0:
         print("----------------------")
@@ -216,14 +217,17 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     # remove resizer
     simulation.operations.updaters.remove(box_resize)
 
+    # update z-direction
+    hoomd.update.BoxResize.update(state=simulation.state, box=hoomd.Box(Lx=L, Ly=L, Lz=Lz))
+
     gsdfile = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(5e4)),
+        trigger = hoomd.trigger.Periodic(period=int(1e3)),
         filename = name + "/{:d}/{:s}.gsd".format(temp, name),
         filter=hoomd.filter.All(),
         mode='wb'
     )
     gsdrestart = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(1e6), phase=int(0)),
+        trigger = hoomd.trigger.Periodic(period=int(1e3), phase=int(0)),
         filename=name + "/{:d}/restart.gsd".format(temp),
         filter=hoomd.filter.All(),
         mode='wb',
