@@ -378,30 +378,21 @@ def simulate(job):
     )
     simulation.operations.writers.append(timelog)
 
-<<<<<<< HEAD
-=======
-    # Equilibration
-    simulation.run(1e5)
+    # TODO: move this to the end of equilibration?
+    if job.sp.method == "resize":
+        # update z-direction
+        hoomd.update.BoxResize.update(state=simulation.state, box=hoomd.Box(Lx=job.doc.L, Ly=job.doc.L, Lz=job.doc.Lz))
 
-    if snapshot.communicator.rank == 0:
-        print("----------------------")
-        print("Finished equilibration")
-        print("----------------------")
-
-    # remove resizer
-    simulation.operations.updaters.remove(box_resize)
-
->>>>>>> 7786102 (test: replace Gaussian wall with box_resize method)
     gsdfile = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(5e4)),
-        filename = job.fn("run.gsd"),
-        filter= hoomd.filter.All(),
+        trigger = hoomd.trigger.Periodic(period=int(1e3)),
+        filename = name + "/{:d}/{:s}.gsd".format(temp, name),
+        filter=hoomd.filter.All(),
         mode='wb'
     )
     gsdrestart = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(1e6), phase=int(0)),
-        filename= job.fn(RESTART_FN),
-        filter= hoomd.filter.All(),
+        trigger = hoomd.trigger.Periodic(period=int(1e3), phase=int(0)),
+        filename=name + "/{:d}/restart.gsd".format(temp),
+        filter=hoomd.filter.All(),
         mode='wb',
         truncate=True,
     )
