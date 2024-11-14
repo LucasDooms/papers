@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-def simulate(residues, name, prot, temp):
+def simulate(residues, name, prot, temp, walltime: int | None = None):
     residues = residues.set_index('one')
 
     try:
@@ -268,7 +268,10 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument('--name', nargs='?', const='', type=str)
     parser.add_argument('--temp', nargs='?', const='', type=int)
+    parser.add_argument('--walltime', nargs='?', const='', type=int, default=0)
     args = parser.parse_args()
+    if args.walltime == 0:
+        args.walltime = None
 
     print(hoomd.__file__)
 
@@ -277,5 +280,5 @@ if __name__ == "__main__":
     print("protein: ", args.name, "temperature: ", args.temp)
 
     t0 = time.time()
-    simulate(residues, args.name, proteins.loc[args.name], args.temp)
+    simulate(residues, args.name, proteins.loc[args.name], args.temp, args.walltime)
     print('Timing {:.3f}'.format(time.time() - t0))
