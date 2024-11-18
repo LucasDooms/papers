@@ -11,49 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-def simulate(residues, name, prot, temp, walltime: int | None = None):
-    residues = residues.set_index('one')
-
-    try:
-        device = hoomd.device.GPU()
-    except Exception as e:
-        print("GPU initialisation returned an error:")
-        print(e)
-        print("")
-        print("Attempting CPU initialisation")
-        print("")
-        device = hoomd.device.CPU()
-    else:
-        if not device.is_available():
-            print("GPU not available, running on CPU instead!")
-            device = hoomd.device.CPU()
-
-    device.notice_level = 1
-
-    simulation = hoomd.Simulation(device, seed=40495)
-
-    pairs, lj_eps, lj_lambda, lj_sigma, fasta, types, MWs = genParamsLJ(residues, name, prot)
-    yukawa_eps, yukawa_kappa, _ = genParamsDH(residues, name, prot, temp)
-
-    # Protein length (number of amino acids)
-    N = len(fasta)
-
-    L = 15.
-    margin = 2
-    if N > 400:
-        L = 25.
-        Lz = 300.
-        margin = 8
-        Nsteps = 2e7
-    elif N > 200:
-        L = 17.
-        Lz = 300.
-        margin = 4
-        Nsteps = 6e7
-    else:
-        Lz = 10 * L
-        Nsteps = 6e7
-
+def create_initial_system(N: int, prot, fasta, types, L, Lz, margin):
     def get_xy_positions(n_chains_max: int = 100):
         """Generate random position in a 2D box"""
         xy = np.empty(0)
@@ -148,7 +106,56 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
             ]
             snapshot.bonds.typeid[begin - j:end - j - 1] = [0] * (N - 1)
 
-    simulation.create_state_from_snapshot(snapshot)
+    return snapshot, n_chains
+
+def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart: bool = False):
+    residues = residues.set_index('one')
+
+    try:
+        device = hoomd.device.GPU()
+    except Exception as e:
+        print("GPU initialisation returned an error:")
+        print(e)
+        print("")
+        print("Attempting CPU initialisation")
+        print("")
+        device = hoomd.device.CPU()
+    else:
+        if not device.is_available():
+            print("GPU not available, running on CPU instead!")
+            device = hoomd.device.CPU()
+
+    device.notice_level = 1
+
+    simulation = hoomd.Simulation(device, seed=40495)
+
+    pairs, lj_eps, lj_lambda, lj_sigma, fasta, types, MWs = genParamsLJ(residues, name, prot)
+    yukawa_eps, yukawa_kappa, _ = genParamsDH(residues, name, prot, temp)
+
+    # Protein length (number of amino acids)
+    N = len(fasta)
+
+    L = 15.
+    margin = 2
+    if N > 400:
+        L = 25.
+        Lz = 300.
+        margin = 8
+        Nsteps = 2e7
+    elif N > 200:
+        L = 17.
+        Lz = 300.
+        margin = 4
+        Nsteps = 6e7
+    else:
+        Lz = 10 * L
+        Nsteps = 6e7
+
+    if is_restart:
+        simulation.create_state_from_gsd(name + '/{:d}'.format(temp) + '/{:s}.gsd'.format(name))
+    else:
+        snapshot, n_chains = create_initial_system(N, prot, fasta, types, L, Lz, margin)
+        simulation.create_state_from_snapshot(snapshot)
 
     kT = 8.3145 * temp * 1e-3
     harmonic_bond = hoomd.md.bond.Harmonic()
@@ -222,7 +229,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     # Equilibration
     simulation.run(2e7)
 
-    if snapshot.communicator.rank == 0:
+    if simulation.device.communicator.rank == 0:
         print("----------------------")
         print("Finished equilibration")
         print("----------------------")
@@ -250,7 +257,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     # Run
     simulation.run(Nsteps)
 
-    if snapshot.communicator.rank == 0:
+    if simulation.device.communicator.rank == 0:
         print("--------------")
         print("Run completed!")
         print("--------------")
@@ -260,7 +267,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
         if hasattr(writer, 'flush'):
             writer.flush()
 
-    if snapshot.communicator.rank == 0:
+    if simulation.device.communicator.rank == 0:
         genDCD(residues, name, prot, temp, n_chains)
 
 
@@ -269,6 +276,7 @@ if __name__ == "__main__":
     parser.add_argument('--name', nargs='?', const='', type=str)
     parser.add_argument('--temp', nargs='?', const='', type=int)
     parser.add_argument('--walltime', nargs='?', const='', type=int, default=0)
+    parser.add_argument('--restart', action='store_true')
     args = parser.parse_args()
     if args.walltime == 0:
         args.walltime = None
@@ -280,5 +288,5 @@ if __name__ == "__main__":
     print("protein: ", args.name, "temperature: ", args.temp)
 
     t0 = time.time()
-    simulate(residues, args.name, proteins.loc[args.name], args.temp, args.walltime)
+    simulate(residues, args.name, proteins.loc[args.name], args.temp, args.walltime, args.restart)
     print('Timing {:.3f}'.format(time.time() - t0))
