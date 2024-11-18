@@ -39,52 +39,17 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     N = len(fasta)
 
     L = 15.
-    margin = 2
     if N > 400:
         L = 25.
         Lz = 300.
-        margin = 8
         Nsteps = 2e7
     elif N > 200:
         L = 17.
         Lz = 300.
-        margin = 4
         Nsteps = 6e7
     else:
         Lz = 10 * L
         Nsteps = 6e7
-
-    def get_xy_positions(n_chains_max: int = 100):
-        """Generate random position in a 2D box"""
-        xy = np.empty(0)
-        xy = np.append(xy, np.random.rand(2) * (L - margin) - (L - margin) / 2).reshape((-1, 2))
-
-        for x, y in np.random.rand(1000, 2) * (L - margin) - (L - margin) / 2:
-            # check if too close to existing positions
-            if np.any(np.linalg.norm(xy - [x, y], axis=1) <= .7):
-                continue
-
-            # same for periodic images
-            x_periodic_image = x - L if x > 0 else x + L
-            if np.any(np.linalg.norm(xy - [x_periodic_image, y], axis=1) <= .7):
-                continue
-            y_periodic_image = y - L if y > 0 else y + L
-            if np.any(np.linalg.norm(xy - [x, y_periodic_image], axis=1) <= .7):
-                continue
-            if np.any(np.linalg.norm(xy - [x_periodic_image, y_periodic_image], axis=1) <= .7):
-                continue
-
-            xy = np.append(xy, [x, y]).reshape((-1, 2))
-
-            if xy.shape[0] == n_chains_max:
-                break
-
-        return xy
-
-    xy = get_xy_positions()
-    n_chains = xy.shape[0]
-
-    print(f'Number of chains {n_chains}, {N} residues long')
 
     def get_3D_positions():
         geo = Geometry.geometry(prot.fasta[0])
@@ -114,39 +79,31 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
         newxyz = np.matmul(newxyz, rotation_matrix_from_quaternion(quaternion))
         xyz = np.array(newxyz[0])
 
-        print(xyz[:, 0].min(), xyz[:, 0].max(), xy[:, 0].min(), xy[:, 0].max())
-        print(xyz[:, 1].min(), xyz[:, 1].max(), xy[:, 1].min(), xy[:, 1].max())
-        
+        print(xyz[:, 0].min(), xyz[:, 0].max())
+        print(xyz[:, 1].min(), xyz[:, 1].max())
+
         return xyz
 
     snapshot = hoomd.Snapshot()
     # check rank to support MPI runs with multiple processors
     if snapshot.communicator.rank == 0:
-        snapshot.configuration.box = hoomd.Box(Lx=L, Ly=L, Lz=N * 0.5)
-        snapshot.particles.types = types
-        snapshot.bonds.types = ['polymer']
-        snapshot.particles.N = N * n_chains
-        # resize array
-        snapshot.bonds.N = n_chains * (N - 1)
-
         xyz = get_3D_positions()
 
-        for j, (x, y) in enumerate(xy):
-            begin = j * N
-            end = j * N + N
+        snapshot.configuration.box = hoomd.Box(Lx=2.0 * L / np.cbrt(100), Ly=2.0 * L / np.cbrt(100), Lz=1.05 * abs(xyz[0, 2] - xyz[-1, 2]))
+        snapshot.particles.types = types
+        snapshot.bonds.types = ['polymer']
+        snapshot.particles.N = N
+        # resize array
+        snapshot.bonds.N = N - 1
 
-            snapshot.particles.position[begin:end] = [
-                [xyz[i, 0] + x, xyz[i, 1] + y, xyz[i, 2]] for i in range(N)]
-            snapshot.particles.typeid[begin:end] = [types.index(a) for a in fasta]
-            snapshot.particles.mass[begin:end] = [
-                residues.loc[a].MW for a in prot.fasta]
-            snapshot.particles.mass[begin] += 2
-            snapshot.particles.mass[end - 1] += 16
+        snapshot.particles.position[:] = [[xyz[i, 0], xyz[i, 1], xyz[i, 2]] for i in range(N)]
+        snapshot.particles.typeid[:] = [types.index(a) for a in fasta]
+        snapshot.particles.mass[:] = [residues.loc[a].MW for a in prot.fasta]
+        snapshot.particles.mass[0] += 2
+        snapshot.particles.mass[-1] += 16
 
-            snapshot.bonds.group[begin - j:end - j - 1] = [
-                [i, i + 1] for i in range(begin, end - 1)
-            ]
-            snapshot.bonds.typeid[begin - j:end - j - 1] = [0] * (N - 1)
+        snapshot.bonds.group[:] = [[i, i + 1] for i in range(N - 1)]
+        snapshot.bonds.typeid[:] = [0 for _ in range(N - 1)]
 
     simulation.create_state_from_snapshot(snapshot)
 
@@ -167,17 +124,23 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
 
         lj2.params[(str(a), str(b))] = {'epsilon': lj_eps * lj_lambda.loc[a, b], 'sigma': lj_sigma.loc[a, b]}
 
+    # replicate the system to obtain multiple chains
+    nx = 4
+    ny = 4
+    nz = 3
+    n_chains = nx * ny * nz
+    simulation.state.replicate(nx=nx, ny=ny, nz=nz)
+
     # resize box
-    ramp_steps = int(2e3)
-    inverse_volume_ramp = hoomd.variant.box.InverseVolumeRamp(
+    ramp_steps = int(3e5)
+    resize_ramp = hoomd.variant.box.Interpolate(
         initial_box=simulation.state.box,
-        final_volume=0.9 * simulation.state.box.volume,
-        t_start=simulation.timestep,
-        t_ramp=ramp_steps,
+        final_box=hoomd.Box(Lx=L, Ly=L, Lz=L),
+        variant=hoomd.variant.Ramp(0.0, 1.0, simulation.timestep, ramp_steps)
     )
     box_resize = hoomd.update.BoxResize(
         trigger=hoomd.trigger.Periodic(10),
-        box=inverse_volume_ramp,
+        box=resize_ramp,
     )
 
     integrator_method = hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=kT)
@@ -201,13 +164,23 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     logger.add(simulation, quantities=['timestep', 'walltime'])
 
     timelog = hoomd.write.Table(
-        trigger = hoomd.trigger.Periodic(period=int(1e3)),
+        trigger = hoomd.trigger.Periodic(period=int(1e4)),
         logger = logger
     )
     simulation.operations.writers.append(timelog)
 
+
+    gsdfile = hoomd.write.GSD(
+        trigger = hoomd.trigger.Periodic(period=int(1e4)),
+        filename = name + "/{:d}/{:s}.gsd".format(temp, name),
+        filter=hoomd.filter.All(),
+        mode='wb'
+    )
+
+    simulation.operations.writers.append(gsdfile)
+
     # Equilibration
-    simulation.run(ramp_steps + 1000)
+    simulation.run(ramp_steps + 5000)
 
     if snapshot.communicator.rank == 0:
         print("----------------------")
@@ -217,15 +190,27 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
     # remove resizer
     simulation.operations.updaters.remove(box_resize)
 
-    # update z-direction
-    hoomd.update.BoxResize.update(state=simulation.state, box=hoomd.Box(Lx=L, Ly=L, Lz=Lz))
+    snap = simulation.state.get_snapshot()
+    if snap.communicator.rank == 0:
 
-    gsdfile = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(1e3)),
-        filename = name + "/{:d}/{:s}.gsd".format(temp, name),
-        filter=hoomd.filter.All(),
-        mode='wb'
-    )
+        def unwrap(d: int):
+            snap_L = snap.configuration.box[d]
+            for i in range(n_chains):
+                new_positions = snap.particles.position[N * i:N * (i + 1)]
+                for j in range(N - 1):
+                    if abs(new_positions[j + 1][d] - new_positions[j][d]) > 2.0: # TODO: get sigma max
+                        # move all previous points to fix periodicity
+                        new_positions[:j + 1, d] += snap_L * (-1 if new_positions[j][d] > 0 else 1)
+
+        # unwrap z-coordinate
+        unwrap(2)
+
+        # update z-direction
+        snap.configuration.box = hoomd.Box(Lx=snap.configuration.box[0], Ly=snap.configuration.box[1], Lz=Lz)
+
+    simulation.state.set_snapshot(snap)
+
+
     gsdrestart = hoomd.write.GSD(
         trigger = hoomd.trigger.Periodic(period=int(1e3), phase=int(0)),
         filename=name + "/{:d}/restart.gsd".format(temp),
@@ -234,13 +219,12 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
         truncate=True,
     )
 
-    simulation.operations.writers.append(gsdfile)
     simulation.operations.writers.append(gsdrestart)
 
     # Run
-    simulation.run(Nsteps)
+    simulation.run(1e6)
 
-    if snapshot.communicator.rank == 0:
+    if simulation.device.communicator.rank == 0:
         print("--------------")
         print("Run completed!")
         print("--------------")
@@ -250,7 +234,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None):
         if hasattr(writer, 'flush'):
             writer.flush()
 
-    if snapshot.communicator.rank == 0:
+    if simulation.device.communicator.rank == 0:
         genDCD(residues, name, prot, temp, n_chains)
 
 
