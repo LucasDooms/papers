@@ -11,7 +11,7 @@ import pandas as pd
 import flow
 
 
-def create_initial_system(N: int, residues, prot, fasta, types, L: float, Lz: float, margin: float):
+def create_initial_system(N: int, residues, prot, fasta, types, L: float, Lz: float, margin: float, method: str):
     def get_xy_positions(n_chains_max: int = 40):
         """Generate random position in a 2D box"""
         xy = np.empty(0)
@@ -38,11 +38,6 @@ def create_initial_system(N: int, residues, prot, fasta, types, L: float, Lz: fl
                 break
 
         return xy
-
-    xy = get_xy_positions()
-    n_chains = xy.shape[0]
-
-    print(f'Number of chains {n_chains}, {N} residues long')
 
     def get_3D_positions():
         geo = Geometry.geometry(prot.fasta[0])
@@ -72,39 +67,62 @@ def create_initial_system(N: int, residues, prot, fasta, types, L: float, Lz: fl
         newxyz = np.matmul(newxyz, rotation_matrix_from_quaternion(quaternion))
         xyz = np.array(newxyz[0])
 
-        print(xyz[:, 0].min(), xyz[:, 0].max(), xy[:, 0].min(), xy[:, 0].max())
-        print(xyz[:, 1].min(), xyz[:, 1].max(), xy[:, 1].min(), xy[:, 1].max())
+        # print(xyz[:, 0].min(), xyz[:, 0].max(), xy[:, 0].min(), xy[:, 0].max())
+        # print(xyz[:, 1].min(), xyz[:, 1].max(), xy[:, 1].min(), xy[:, 1].max())
 
         return xyz
 
     snapshot = hoomd.Snapshot()
     # check rank to support MPI runs with multiple processors
     if snapshot.communicator.rank == 0:
-        snapshot.configuration.box = hoomd.Box(Lx=L, Ly=L, Lz=Lz) # type: ignore
-        snapshot.particles.types = types
-        snapshot.bonds.types = ['polymer']
-        snapshot.particles.N = N * n_chains
-        # resize array
-        snapshot.bonds.N = n_chains * (N - 1)
+        if method == "box":
+            xy = get_xy_positions()
+            n_chains = xy.shape[0]
 
-        xyz = get_3D_positions()
+            snapshot.configuration.box = hoomd.Box(Lx=L, Ly=L, Lz=Lz) # type: ignore
+            snapshot.particles.types = types
+            snapshot.bonds.types = ['polymer']
+            snapshot.particles.N = N * n_chains
+            # resize array
+            snapshot.bonds.N = n_chains * (N - 1)
 
-        for j, (x, y) in enumerate(xy):
-            begin = j * N
-            end = j * N + N
+            xyz = get_3D_positions()
 
-            snapshot.particles.position[begin:end] = [
-                [xyz[i, 0] + x, xyz[i, 1] + y, xyz[i, 2]] for i in range(N)]
-            snapshot.particles.typeid[begin:end] = [types.index(a) for a in fasta]
-            snapshot.particles.mass[begin:end] = [
-                residues.loc[a].MW for a in prot.fasta]
-            snapshot.particles.mass[begin] += 2
-            snapshot.particles.mass[end - 1] += 16
+            for j, (x, y) in enumerate(xy):
+                begin = j * N
+                end = j * N + N
 
-            snapshot.bonds.group[begin - j:end - j - 1] = [
-                [i, i + 1] for i in range(begin, end - 1)
-            ]
-            snapshot.bonds.typeid[begin - j:end - j - 1] = [0] * (N - 1)
+                snapshot.particles.position[begin:end] = [
+                     [xyz[i, 0] + x, xyz[i, 1] + y, xyz[i, 2]] for i in range(N)]
+                snapshot.particles.typeid[begin:end] = [types.index(a) for a in fasta]
+                snapshot.particles.mass[begin:end] = [
+                     residues.loc[a].MW for a in prot.fasta]
+                snapshot.particles.mass[begin] += 2
+                snapshot.particles.mass[end - 1] += 16
+
+                snapshot.bonds.group[begin - j:end - j - 1] = [
+                     [i, i + 1] for i in range(begin, end - 1)
+                     ]
+                snapshot.bonds.typeid[begin - j:end - j - 1] = [0] * (N - 1)
+
+        elif method == "resize":
+            xyz = get_3D_positions()
+
+            snapshot.configuration.box = hoomd.Box(Lx=2.0 * L / np.cbrt(100), Ly=2.0 * L / np.cbrt(100), Lz=1.05 * abs(xyz[0, 2] - xyz[-1, 2]))
+            snapshot.particles.types = types
+            snapshot.bonds.types = ['polymer']
+            snapshot.particles.N = N
+            # resize array
+            snapshot.bonds.N = N - 1
+
+            snapshot.particles.position[:] = [[xyz[i, 0], xyz[i, 1], xyz[i, 2]] for i in range(N)]
+            snapshot.particles.typeid[:] = [types.index(a) for a in fasta]
+            snapshot.particles.mass[:] = [residues.loc[a].MW for a in prot.fasta]
+            snapshot.particles.mass[0] += 2
+            snapshot.particles.mass[-1] += 16
+
+            snapshot.bonds.group[:] = [[i, i + 1] for i in range(N - 1)]
+            snapshot.bonds.typeid[:] = [0 for _ in range(N - 1)]
 
     return snapshot
 
@@ -201,6 +219,8 @@ def initialize(job):
     job.doc.types = types
     job.doc.N = N
 
+    simulation = create_simulation(residues, name, prot, temp, model, job.sp.seed)
+
     L = 15.
     margin = 2
     if N > 400:
@@ -218,10 +238,21 @@ def initialize(job):
     job.doc.Lz = Lz
     job.doc.margin = margin
 
-    snapshot = create_initial_system(N, residues, prot, fasta, types, L, Lz, margin)
+    if job.sp.method == "box":
+        snapshot = create_initial_system(N, residues, prot, fasta, types, L, Lz, margin, job.sp.method)
+        simulation.create_state_from_snapshot(snapshot)
+    elif job.sp.method == "resize":
+        snapshot = create_initial_system(N, residues, prot, fasta, types, L, Lz, margin, job.sp.method)
+        simulation.create_state_from_snapshot(snapshot)
 
-    simulation = create_simulation(residues, name, prot, temp, model, job.sp.seed)
-    simulation.create_state_from_snapshot(snapshot)
+        # replicate the system to obtain multiple chains
+        nx = 4
+        ny = 4
+        nz = 3
+        job.doc.n_chains = nx * ny * nz
+
+        assert(simulation.state is not None)
+        simulation.state.replicate(nx=nx, ny=ny, nz=nz)
 
     hoomd.write.GSD.write(simulation.state, job.fn("initial.gsd"))
 
@@ -306,15 +337,15 @@ def equilibrate(job):
         assert(state is not None)
 
         # resize box
-        inverse_volume_ramp = hoomd.variant.box.InverseVolumeRamp(
+        ramp_steps = int(3e5)
+        resize_ramp = hoomd.variant.box.Interpolate(
             initial_box=state.box,
-            final_volume=0.9 * state.box.volume,
-            t_start=simulation.timestep,
-            t_ramp=20_000,
+            final_box=hoomd.Box(Lx=job.doc.L, Ly=job.doc.L, Lz=job.doc.L),
+            variant=hoomd.variant.Ramp(0.0, 1.0, simulation.timestep, ramp_steps)
         )
         box_resize = hoomd.update.BoxResize(
             trigger=hoomd.trigger.Periodic(10),
-            box=inverse_volume_ramp,
+            box=resize_ramp,
         )
 
         simulation.operations.updaters.append(box_resize)
@@ -373,22 +404,36 @@ def simulate(job):
     logger.add(simulation, quantities=['timestep', 'walltime'])
 
     timelog = hoomd.write.Table(
-        trigger = hoomd.trigger.Periodic(period=int(1e3)),
+        trigger = hoomd.trigger.Periodic(period=int(1e4)),
         logger = logger
     )
     simulation.operations.writers.append(timelog)
 
     # TODO: move this to the end of equilibration?
     if job.sp.method == "resize":
-        # update z-direction
-        hoomd.update.BoxResize.update(state=simulation.state, box=hoomd.Box(Lx=job.doc.L, Ly=job.doc.L, Lz=job.doc.Lz))
+        state = simulation.state
+        assert(state is not None)
 
-    gsdfile = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(1e3)),
-        filename = name + "/{:d}/{:s}.gsd".format(temp, name),
-        filter=hoomd.filter.All(),
-        mode='wb'
-    )
+        snap = state.get_snapshot()
+        if snap.communicator.rank == 0:
+
+            def unwrap(d: int):
+                snap_L = snap.configuration.box[d]
+                for i in range(job.doc.n_chains):
+                    new_positions = snap.particles.position[job.doc.N * i:job.doc.N * (i + 1)]
+                    for j in range(job.doc.N - 1):
+                        if abs(new_positions[j + 1][d] - new_positions[j][d]) > 2.0: # TODO: get sigma max
+                            # move all previous points to fix periodicity
+                            new_positions[:j + 1, d] += snap_L * (-1 if new_positions[j][d] > 0 else 1)
+
+            # unwrap z-coordinate
+            unwrap(2)
+
+            # update z-direction
+            snap.configuration.box = hoomd.Box(Lx=snap.configuration.box[0], Ly=snap.configuration.box[1], Lz=job.doc.Lz)
+
+        state.set_snapshot(snap)
+
     gsdrestart = hoomd.write.GSD(
         trigger = hoomd.trigger.Periodic(period=int(1e3), phase=int(0)),
         filename=name + "/{:d}/restart.gsd".format(temp),
@@ -397,7 +442,6 @@ def simulate(job):
         truncate=True,
     )
 
-    simulation.operations.writers.append(gsdfile)
     simulation.operations.writers.append(gsdrestart)
 
     def finish():
