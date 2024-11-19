@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-def create_initial_system(N: int, prot, fasta, types, L, Lz, margin):
+def create_initial_system(N: int, residues, prot, fasta, types, L, Lz, margin):
     def get_xy_positions(n_chains_max: int = 100):
         """Generate random position in a 2D box"""
         xy = np.empty(0)
@@ -153,8 +153,9 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
 
     if is_restart:
         simulation.create_state_from_gsd(name + '/{:d}'.format(temp) + '/{:s}.gsd'.format(name))
+        n_chains = simulation.state.N_particles / N
     else:
-        snapshot, n_chains = create_initial_system(N, prot, fasta, types, L, Lz, margin)
+        snapshot, n_chains = create_initial_system(N, residues, prot, fasta, types, L, Lz, margin)
         simulation.create_state_from_snapshot(snapshot)
 
     kT = 8.3145 * temp * 1e-3
@@ -174,29 +175,6 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
 
         lj2.params[(str(a), str(b))] = {'epsilon': lj_eps * lj_lambda.loc[a, b], 'sigma': lj_sigma.loc[a, b]}
 
-    walls = []
-    if N > 400:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -50), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 50), (0, 0, -1))
-        )
-    elif N > 200:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -30), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 30), (0, 0, -1))
-        )
-    else:
-        walls.append(
-            hoomd.wall.Plane((0, 0, -10), (0, 0, 1))
-        )
-        walls.append(
-            hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
-        )
-
     gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
     gaussian_wall.params[types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0}
 
@@ -209,7 +187,6 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
     integrator.forces.append(lj1)
     integrator.forces.append(lj2)
     integrator.forces.append(yukawa)
-    integrator.forces.append(gaussian_wall)
 
     operations = hoomd.Operations()
     operations.integrator = integrator
@@ -226,16 +203,41 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
     )
     simulation.operations.writers.append(timelog)
 
-    # Equilibration
-    simulation.run(2e7)
+    if not is_restart:
+        walls = []
+        if N > 400:
+            walls.append(
+                hoomd.wall.Plane((0, 0, -50), (0, 0, 1))
+            )
+            walls.append(
+                hoomd.wall.Plane((0, 0, 50), (0, 0, -1))
+            )
+        elif N > 200:
+            walls.append(
+                hoomd.wall.Plane((0, 0, -30), (0, 0, 1))
+            )
+            walls.append(
+                hoomd.wall.Plane((0, 0, 30), (0, 0, -1))
+            )
+        else:
+            walls.append(
+                hoomd.wall.Plane((0, 0, -10), (0, 0, 1))
+            )
+            walls.append(
+                hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
+            )
+        integrator.forces.append(gaussian_wall)
 
-    if simulation.device.communicator.rank == 0:
-        print("----------------------")
-        print("Finished equilibration")
-        print("----------------------")
+        # Equilibration
+        simulation.run(2e7)
 
-    # Remove walls
-    simulation.operations.integrator.forces.remove(gaussian_wall)
+        if simulation.device.communicator.rank == 0:
+            print("----------------------")
+            print("Finished equilibration")
+            print("----------------------")
+
+        # Remove walls
+        simulation.operations.integrator.forces.remove(gaussian_wall)
 
     gsdfile = hoomd.write.GSD(
         trigger = hoomd.trigger.Periodic(period=int(5e4)),
@@ -271,7 +273,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
         genDCD(residues, name, prot, temp, n_chains)
 
 
-if __name__ == "__main__":
+def main():
     parser = ArgumentParser()
     parser.add_argument('--name', nargs='?', const='', type=str)
     parser.add_argument('--temp', nargs='?', const='', type=int)
@@ -290,3 +292,7 @@ if __name__ == "__main__":
     t0 = time.time()
     simulate(residues, args.name, proteins.loc[args.name], args.temp, args.walltime, args.restart)
     print('Timing {:.3f}'.format(time.time() - t0))
+
+
+if __name__ == "__main__":
+    main()
