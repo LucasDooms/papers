@@ -152,7 +152,7 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
         Nsteps = 6e7
 
     if is_restart:
-        simulation.create_state_from_gsd(name + '/{:d}'.format(temp) + '/{:s}.gsd'.format(name))
+        simulation.create_state_from_gsd(name + '/{:d}'.format(temp) + '/restart.gsd'.format(name))
         n_chains = simulation.state.N_particles / N
     else:
         snapshot, n_chains = create_initial_system(N, residues, prot, fasta, types, L, Lz, margin)
@@ -174,9 +174,6 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
         lj1.r_cut[(str(a), str(b))] = 2.**(1./6.) * lj_sigma.loc[a, b]
 
         lj2.params[(str(a), str(b))] = {'epsilon': lj_eps * lj_lambda.loc[a, b], 'sigma': lj_sigma.loc[a, b]}
-
-    gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
-    gaussian_wall.params[types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0}
 
     integrator_method = hoomd.md.methods.Langevin(filter=hoomd.filter.All(), kT=kT)
     for a, mw in zip(types, MWs):
@@ -226,6 +223,10 @@ def simulate(residues, name, prot, temp, walltime: int | None = None, is_restart
             walls.append(
                 hoomd.wall.Plane((0, 0, 10), (0, 0, -1))
             )
+
+        gaussian_wall = hoomd.md.external.wall.Gaussian(walls)
+        gaussian_wall.params[types] = {'epsilon': 10.0, 'sigma': 1.0, 'r_cut': 4.0}
+
         integrator.forces.append(gaussian_wall)
 
         # Equilibration
