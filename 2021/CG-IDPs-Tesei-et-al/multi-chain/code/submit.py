@@ -69,7 +69,7 @@ for job in project:
                 temp=f'{temp:d}',
                 walltime_formatted=walltime_formatted,
                 id=id
-            )
+            ) + "\n"
         )
 
     subprocess.run(['sbatch', script_name])
