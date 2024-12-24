@@ -6,9 +6,9 @@
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1
 #SBATCH --time={{walltime_formatted}}
-#SBATCH --job-name={{name}}_{{temp}}
+#SBATCH --job-name={{id}}
 
 module purge
 conda activate new-cg-idps
 
-python simulate.py --name {{name}} --temp {{temp}} --walltime {{walltime_seconds}}
+python simulate.py run --job {{id}}

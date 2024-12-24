@@ -11,7 +11,7 @@ def initProteins():
     return pd.read_csv("proteins.csv", index_col=0)
 
 
-def genParamsLJ(df, name, prot):
+def genParamsLJ(df, name, prot, model):
     fasta = list(prot.fasta)
     r = df.copy()
     r.loc['X'] = r.loc[fasta[0]]
@@ -24,6 +24,7 @@ def genParamsLJ(df, name, prot):
     MWs = [r.loc[a, 'MW'] for a in types]
     sigmamap = pd.DataFrame((r.sigmas.values + r.sigmas.values.reshape(-1, 1)
                              ) / 2, index=r.sigmas.index, columns=r.sigmas.index)
+    r.lambdas = r[model]
     lambdamap = pd.DataFrame((r.lambdas.values + r.lambdas.values.reshape(-1, 1)
                               ) / 2, index=r.lambdas.index, columns=r.lambdas.index)
     lj_eps = prot.eps_factor * 4.184

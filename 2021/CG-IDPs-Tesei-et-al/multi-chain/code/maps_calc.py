@@ -1,9 +1,5 @@
 from analyse import *
-import MDAnalysis
 import time
-import os
-import glob
-import sys
 import pandas as pd
 import numpy as np
 import mdtraj as md
@@ -16,6 +12,7 @@ import time
 parser = ArgumentParser()
 parser.add_argument('--name',nargs='?',const='', type=str)
 parser.add_argument('--temp',nargs='?',const='', type=int)
+parser.add_argument('--model',nargs='?',const='', type=str)
 args = parser.parse_args()
 
 lj = lambda x,sig,lj_eps : 4*lj_eps*((sig/x)**12-(sig/x)**6)
@@ -55,7 +52,7 @@ def calcWidth(path,name,temp):
     cutoff2 = .5*(np.abs(res1.x[2]+6*res1.x[3])+np.abs(-res2.x[2]-6*res2.x[3]))
     return cutoff1, cutoff2
 
-def trajCM(df,proteins,name,temp):
+def trajCM(df,proteins,name,temp,model):
     # this function finds the index of the chain at the center of the slab for each frame
     path = '{:s}/{:d}/'.format(name,temp)
     cutoff1, cutoff2 = calcWidth(path,name,temp)
@@ -109,7 +106,7 @@ def trajCM(df,proteins,name,temp):
 
     pairs = np.array(list(itertools.product(prot.fasta,prot.fasta)))
     pairs = np.core.defchararray.add(pairs[:,0],pairs[:,1])
-    _, lj_eps, lj_lambda, lj_sigma, _, _, _ = genParamsLJ(df,name,prot)
+    _, lj_eps, lj_lambda, lj_sigma, _, _, _ = genParamsLJ(df,name,prot,model)
     dflambda = lj_lambda.unstack()
     dflambda.index = dflambda.index.map('{0[0]}{0[1]}'.format)
     dfsigma = lj_sigma.unstack()
@@ -134,7 +131,7 @@ prot = proteins.loc[args.name]
 
 t0 = time.time()
 
-cmap, ecmap, rgsC, rgsD = trajCM(df,proteins,args.name,args.temp)
+cmap, ecmap, rgsC, rgsD = trajCM(df,proteins,args.name,args.temp,args.model)
 np.savetxt('{:s}_{:d}_rgC.dat'.format(args.name,args.temp),rgsC)
 np.savetxt('{:s}_{:d}_rgD.dat'.format(args.name,args.temp),rgsD)
 np.save('{:s}_{:d}_cmap.npy'.format(args.name,args.temp),cmap)

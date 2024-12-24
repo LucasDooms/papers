@@ -1,21 +1,27 @@
 from analyse import initProteins
 from collections import defaultdict
 from typing import Dict
-from pathlib import Path
 from jinja2 import Template
 import pandas as pd
+import signac
 import subprocess
+
+
+# init project
+project = signac.init_project()
+
 
 # DEFINE PARAMETERS HERE
 
-protein_names = ['ht40']
+protein_names = ['FUS']
 temperatures = [323, 360, 380, 400]
 model = 'M1'
-
-# set to all zeros to disable walltime (and remove it from submit_template.sh)
+seed = 1431455135312
+Nsteps = int(2e7)
 walltime = {'d': 1, 'h': 0, 'm': 0, 's': 0}
 
 # END OF PARAMETERS
+
 
 def to_seconds(wt: Dict[str, int]) -> int:
     convert = defaultdict(default_factory=0, **{'s': 1, 'm': 60, 'h': 60 * 60, 'd': 24 * 60 * 60})
@@ -36,35 +42,33 @@ def slurm_format(seconds: int) -> str:
 walltime_seconds = to_seconds(walltime)
 walltime_formatted = slurm_format(walltime_seconds)
 
-
 proteins_db = initProteins()
+for name, prot in proteins_db.loc[protein_names].iterrows():
+    for temp in temperatures:
+        statepoint = dict(name=name, temp=temp, model=model, seed=seed, Nsteps=Nsteps, walltime_dict=walltime, walltime=walltime_seconds)
+        job = project.open_job(statepoint)
+        job.init()
+
 
 with open("submit_template.sh", "r") as file:
     contents = file.read()
     submission = Template(contents)
 
-residues = pd.read_csv('residues.csv', float_precision='round_trip').set_index('three')
-residues.lambdas = residues[model]
-residues.to_csv('residues.csv')
+# create and submit cluster jobs
+for job in project:
+    name = job.sp.name
+    temp = job.sp.temp
+    id = job.id
+    script_name = f"{name:s}_{temp:d}_{id}.sh"
 
-for name, prot in proteins_db.loc[protein_names].iterrows():
-    base_path = Path(name)
-    base_path.mkdir(exist_ok=True)
-
-    for temp in temperatures:
-        temp_path = base_path / f'{temp:d}'
-        temp_path.mkdir(exist_ok=True)
-
-        script_name = f"{name:s}_{temp:d}.sh"
-
-        with open(script_name, 'w') as submit:
-            submit.write(
-                submission.render(
-                    name=name,
-                    temp=f'{temp:d}',
-                    walltime_formatted=walltime_formatted,
-                    walltime_seconds=walltime_seconds
-                )
+    with open(script_name, 'w') as submit:
+        submit.write(
+            submission.render(
+                name=name,
+                temp=f'{temp:d}',
+                walltime_formatted=walltime_formatted,
+                id=id
             )
+        )
 
-        subprocess.run(['sbatch', script_name])
+    subprocess.run(['sbatch', script_name])
