@@ -434,14 +434,21 @@ def simulate(job):
 
         state.set_snapshot(snap)
 
+    gsdfile = hoomd.write.GSD(
+        trigger = hoomd.trigger.Periodic(period=int(5e4)),
+        filename = job.fn("run.gsd"),
+        filter= hoomd.filter.All(),
+        mode='wb'
+    )
     gsdrestart = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(1e3), phase=int(0)),
-        filename=name + "/{:d}/restart.gsd".format(temp),
-        filter=hoomd.filter.All(),
+        trigger = hoomd.trigger.Periodic(period=int(1e6), phase=int(0)),
+        filename= job.fn(RESTART_FN),
+        filter= hoomd.filter.All(),
         mode='wb',
         truncate=True,
     )
 
+    simulation.operations.writers.append(gsdfile)
     simulation.operations.writers.append(gsdrestart)
 
     def finish():
