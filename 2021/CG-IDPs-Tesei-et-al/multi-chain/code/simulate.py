@@ -251,7 +251,7 @@ def initialize(job):
         nz = 3
         job.doc.n_chains = nx * ny * nz
 
-        assert(simulation.state is not None)
+        assert simulation.state is not None
         simulation.state.replicate(nx=nx, ny=ny, nz=nz)
 
     hoomd.write.GSD.write(simulation.state, job.fn("initial.gsd"))
@@ -259,28 +259,28 @@ def initialize(job):
     job.doc.initialized = True
 
 
-def run_with_restart(simulation, end_step: int, job, restart_file_name: str, finish, steps_per_loop: int = int(1e5)):
+def run_with_restart(simulation, end_step: int, job, steps_per_loop: int = int(1e5)) -> bool:
     try:
         while simulation.timestep < end_step:
             print(simulation.timestep)
             simulation.run(min(steps_per_loop, end_step - simulation.timestep))
 
             # The walltime will be reached soon, abort now
-            if simulation.walltime + simulation.device.communicator.walltime >= job.sp.walltime:
+            if simulation.device.communicator.walltime + 1.05 * simulation.walltime >= job.sp.walltime:
                 break
         else:
             # finished entire simulation
-            finish()
+            return True
     finally:
-        hoomd.write.GSD.write(
-            state=simulation.state, mode="wb", filename=job.fn(restart_file_name)
-        )
-        job.document["timestep"] = simulation.timestep
+        for writer in simulation.operations.writers:
+            if hasattr(writer, 'flush'):
+                writer.flush()
 
         walltime = simulation.device.communicator.walltime
         simulation.device.notice(
             f"{job.id} ended on step {simulation.timestep} after {walltime} seconds"
         )
+    return False
 
 
 N_EQUILIBRIUM_STEPS: int = int(1e6)
@@ -334,7 +334,7 @@ def equilibrate(job):
         simulation.operations.integrator.forces.append(gaussian_wall) # type: ignore
     elif job.sp.method == "resize":
         state = simulation.state
-        assert(state is not None)
+        assert state is not None
 
         # resize box
         ramp_steps = int(3e5)
@@ -375,10 +375,11 @@ def equilibrate(job):
         job.document.equilibrated = True
 
     # Equilibration
-    run_with_restart(simulation, end_step, job, EQUILIBRIUM_RESTART_FN, finish)
+    if run_with_restart(simulation, end_step, job):
+        finish()
 
 
-RESTART_FN: str = "restart.gsd"
+RUN_FN: str = "run.gsd"
 
 @Project.pre.true("equilibrated") # type: ignore
 @Project.post.true("finished") # type: ignore
@@ -396,7 +397,7 @@ def simulate(job):
 
     simulation = create_simulation(residues, name, prot, temp, job.sp.model, job.sp.seed)
     simulation.create_state_from_gsd(
-        job.fn(RESTART_FN if job.isfile(RESTART_FN) else EQUILIBRIUM_FN)
+        job.fn(RUN_FN if job.isfile(RUN_FN) else EQUILIBRIUM_FN)
     )
 
     # Logging
@@ -438,18 +439,10 @@ def simulate(job):
         trigger = hoomd.trigger.Periodic(period=int(5e4)),
         filename = job.fn("run.gsd"),
         filter= hoomd.filter.All(),
-        mode='wb'
-    )
-    gsdrestart = hoomd.write.GSD(
-        trigger = hoomd.trigger.Periodic(period=int(1e6), phase=int(0)),
-        filename= job.fn(RESTART_FN),
-        filter= hoomd.filter.All(),
-        mode='wb',
-        truncate=True,
+        mode='ab'
     )
 
     simulation.operations.writers.append(gsdfile)
-    simulation.operations.writers.append(gsdrestart)
 
     def finish():
         if simulation.device.communicator.rank == 0:
@@ -457,15 +450,11 @@ def simulate(job):
             print("Run completed!")
             print("--------------")
 
-        # Make sure writers are finished
-        for writer in simulation.operations.writers:
-            if hasattr(writer, 'flush'):
-                writer.flush()
-
         job.document.finished = True
 
     # Run
-    run_with_restart(simulation, end_step, job, RESTART_FN, finish)
+    if run_with_restart(simulation, end_step, job):
+        finish()
 
 
 # The simulation can be started with `python simulate.py run` or submitted to a cluster with `python simulate.py submit`
